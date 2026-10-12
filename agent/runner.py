@@ -60,6 +60,13 @@ Interface bắt buộc (agent/loop.py import và gọi hàm này nếu tồn t�
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
+import re
+from uuid import uuid4
+
+from agent import ledger, pii, policy, tools
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 DEFAULT_LEDGER_PATH = REPORTS_DIR / "ledger.jsonl"
@@ -69,6 +76,74 @@ class RunnerScaffoldPending(NotImplementedError):
     """Only the original 3c stub uses this to enable the CP1/CP2 baseline."""
 
 
+def _authorize(context: policy.PolicyContext, args: dict, ledger_path: Path) -> bool:
+    allowed, reason = policy.check(context)
+    agent_id, run_id = context.agent_owner.split("/", 1)
+    ledger.append({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "agent_id": agent_id,
+        "run_id": run_id,
+        "on_behalf_of": context.principal_id,
+        "expires_at": context.expires_at,
+        "tool": context.requested_tool,
+        "operation": args.get("operation", "tool_call"),
+        "args_hash": hashlib.sha256(
+            json.dumps(args, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "classification": context.data_classification,
+        "decision": "allow" if allowed else "deny",
+        "reason": reason,
+    }, ledger_path)
+    return allowed
+
+
+def _read_related_customers(ticket_ids: list[int], context: policy.PolicyContext,
+                            ledger_path: Path) -> None:
+    if not ticket_ids:
+        return
+    # Resolving the trusted mapping also opens restricted data: authorize
+    # and audit this access before even opening the private store.
+    if not _authorize(context, {"operation": "resolve_customer_ids", "ticket_ids": ticket_ids},
+                      ledger_path):
+        return
+    customers = json.loads(tools.CUSTOMERS_FILE.read_text(encoding="utf-8"))
+    selected_tickets = set(ticket_ids)
+    customer_ids = sorted({
+        customer["customer_id"] for customer in customers
+        if selected_tickets.intersection(customer.get("related_tickets", []))
+    })
+    for customer_id in customer_ids:
+        if _authorize(context, {"customer_id": customer_id}, ledger_path):
+            tools.read_customer(customer_id)
+
+
 def handle(message: str, llm, log_dir: Path | None = None,
            principal_id: str = "support_l1") -> str:
-    raise RunnerScaffoldPending("BƯỚC 3c: implement trifecta split")
+    ledger_path = Path(log_dir) / "ledger.jsonl" if log_dir is not None else DEFAULT_LEDGER_PATH
+    agent_id = f"lab24-agent-{uuid4().hex}"
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    search_context = policy.PolicyContext(
+        data_classification="internal", request_purpose="summarize-tickets",
+        agent_owner=f"{agent_id}/{uuid4().hex}", delegation_depth=0,
+        egress_enabled=False, principal_id=principal_id, requested_tool="search_docs",
+        agent_scopes=("search_docs",), expires_at=expires_at,
+    )
+    if not _authorize(search_context, {"query": message}, ledger_path):
+        return "Không được phép tìm ticket với principal này."
+    docs = tools.search_docs(message)
+    sanitized_docs = [{"id": doc["id"], "text": pii.redact(doc["text"])} for doc in docs]
+    summary = llm.summarize(sanitized_docs)
+    # Only typed IDs from file names cross to the private-data run. Free
+    # text, customer IDs and network instructions from tickets do not.
+    ticket_ids = sorted({
+        int(match.group(1)) for doc in docs
+        if (match := re.fullmatch(r"ticket-([0-9]+)(?:b)?\.md", doc["id"]))
+    })
+    customer_context = policy.PolicyContext(
+        data_classification="restricted", request_purpose="support-reply",
+        agent_owner=f"{agent_id}/{uuid4().hex}", delegation_depth=0,
+        egress_enabled=False, principal_id=principal_id, requested_tool="read_customer",
+        agent_scopes=("read_customer",), expires_at=expires_at,
+    )
+    _read_related_customers(ticket_ids, customer_context, ledger_path)
+    return summary

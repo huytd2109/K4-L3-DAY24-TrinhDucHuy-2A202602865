@@ -35,6 +35,12 @@ không phải xác thực người dùng production.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+
+
+PRINCIPALS_FILE = Path(__file__).resolve().parent.parent / "data" / "principals.json"
 
 
 @dataclass(frozen=True)
@@ -52,4 +58,40 @@ class PolicyContext:
 
 
 def check(context: PolicyContext) -> tuple[bool, str]:
-    raise NotImplementedError("BƯỚC 3b: implement policy check")
+    if context.data_classification not in {"public", "internal", "restricted"}:
+        return False, "unknown data classification"
+    if context.data_classification == "restricted" and context.egress_enabled:
+        return False, "restricted data cannot be used in an egress-enabled run"
+    if not context.agent_owner or context.delegation_depth < 0:
+        return False, "missing agent owner or invalid delegation depth"
+
+    try:
+        principals = json.loads(PRINCIPALS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False, "principal registry unavailable or invalid"
+    if not isinstance(principals, dict):
+        return False, "invalid principal registry"
+    principal = principals.get(context.principal_id)
+    if not isinstance(principal, dict):
+        return False, "unknown principal"
+    allowed_tools = principal.get("allowed_tools", [])
+    purposes = principal.get("purposes", [])
+    if not isinstance(allowed_tools, list) or not isinstance(purposes, list):
+        return False, "invalid principal permissions"
+    if context.request_purpose not in purposes:
+        return False, "purpose not authorized for principal"
+    if not context.requested_tool or context.requested_tool not in allowed_tools:
+        return False, "tool not authorized for principal"
+    if context.requested_tool not in context.agent_scopes:
+        return False, "tool outside agent scopes"
+    if context.delegation_depth > 0 and context.requested_tool not in context.parent_scopes:
+        return False, "tool outside parent scopes"
+    try:
+        expires_at = datetime.fromisoformat(context.expires_at)
+    except (TypeError, ValueError):
+        return False, "invalid or missing expiry"
+    if expires_at.tzinfo is None or expires_at.utcoffset().total_seconds() != 0:
+        return False, "expiry must be timezone-aware UTC"
+    if expires_at <= datetime.now(timezone.utc):
+        return False, "delegation expired"
+    return True, "principal, purpose, scopes and UTC expiry authorize tool"
