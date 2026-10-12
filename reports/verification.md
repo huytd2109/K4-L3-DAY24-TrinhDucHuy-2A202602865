@@ -1,10 +1,10 @@
-# Verification — điền trước khi nộp
+# Verification — CP1–CP5
 
-- OS / Python / Gitleaks version:
-- `python -m pytest tests/ -q`:
-- `pre-commit run --all-files`:
-- Ledger verify: `True` trên `reports/ledger.jsonl` sau lượt CLI `dpo` ở CP3e; thử sửa một ký tự ở dòng giữa trả `False`, khôi phục nguyên file trả `True`.
-- Các lỗi còn lại:
+- OS / Python / Gitleaks version: Windows/PowerShell; Python 3.13.15, pytest 9.1.1; Gitleaks 8.30.1; pre-commit 4.6.2, pip-tools 7.6.2.
+- `python -m pytest tests/ -q --basetemp=.pytest_tmp`: **33 passed in 4.80s; 0 failed, 0 skipped**. CP5 `attack-after.log`: **0 byte** sau lượt CLI riêng với sink thật, không lấy log vừa bị fixture reset làm bằng chứng.
+- `pre-commit run --all-files`: **Passed**, exit `0` tại CP4 và lượt rà cuối CP5; lệnh thực tế dùng `.venv\Scripts\python.exe -m pre_commit`, xem `reports/secrets-incident.md:55`.
+- Ledger verify: **True** trên `reports/ledger.jsonl` sau CP5; **48 dòng**, dòng **48** là `http_post deny`, `on_behalf_of=dpo`, reason có nội dung. CP3e đã thử sửa một ký tự ở dòng giữa trả `False`, khôi phục nguyên file trả `True`.
+- Các lỗi còn lại: không có test lỗi/SKIP ở lượt CP5; **NOT_VERIFIED** đối với điều khoản pháp luật cụ thể vì chưa đọc/đối chiếu được bản gốc. Không tuyên bố chứng nhận tuân thủ.
 
 ## CP3a–CP3c — 12/10/2026
 
@@ -84,3 +84,77 @@ Các lệnh dùng cùng venv và biến môi trường UTF-8 như CP3a–CP3c, v
 - `append()` đặt `prev_hash` đầu tiên bằng 64 số `0`, nối hash dòng trước, tính SHA-256 từ JSON `sort_keys=True` chưa chứa `hash`. `verify()` kiểm reason là chuỗi không trắng, liên kết `prev_hash`, hash từng dòng; JSON hỏng/file không đọc được trả `False`.
 - Đã tự kiểm trên ledger thật: lưu bytes gốc trong bộ nhớ, đổi đúng một ký tự ở **dòng 13** từ `"decision": "allow"` thành `"decision": "Allow"`; `verify()` trả **False**. Khôi phục nguyên bytes trong `finally`, đối chiếu file khớp bản gốc và `verify()` trả **True**. Không tạo file tamper hoặc backup phụ; ledger cuối còn nguyên bằng chứng hợp lệ.
 - Hash chain không tự phát hiện xoá dòng cuối hay viết lại cả chuỗi kèm tính lại hash nếu thiếu mốc tin cậy bên ngoài. Chưa chạy toàn suite hoặc checkpoint supply chain/CP5 ở lượt này. `reports/attack-before.log` vẫn giữ đủ 4 dòng CP2.
+
+## Tổng hợp CP1, CP2 và CP4
+
+Các kết quả CP1–CP4 dưới đây là các lượt đã thực hiện trong chuỗi làm bài, không phải số liệu suy ra từ test CP5; phần CP3 phía trên giữ nguyên snapshot tại thời điểm từng checkpoint.
+
+| Checkpoint | Lệnh/thao tác | Output/bằng chứng đã ghi |
+|---|---|---|
+| CP1 | Đọc `_naive_loop()` và tool, không chạy test | Ba câu trong `reports/baseline.md:3`; chỉ rõ ticket là dữ liệu nhưng baseline làm theo chỉ thị trong text, chưa có cổng kiểm quyền. |
+| CP2 | `python sink/sink.py --reset`; bật sink; `python -m agent.loop --mock "Tổng hợp các ticket còn mở tuần này"` khi runner còn scaffold | CLI ban đầu tổng hợp 41 ticket, sink ghi 1 POST synthetic. Sau tạo lure, reset và replay riêng 901, 902, 903, 904/904b bằng corpus tạm trước khi sửa runner. Bản cuối `reports/attack-before.log:1` đến `:4` có 4 POST theo thứ tự lượt chạy. |
+| CP2 | `python -m agent.check_lure corpus/ticket-90*.md` | `4/4 lure sẵn sàng`; cặp 904 riêng từng file trả `find_injection=None`, ghép đủ 2 marker. Kỹ thuật/kết quả từng biến thể ở `injection-corpus.md`. |
+| CP4 | `gitleaks version`; `gitleaks git --config .gitleaks.toml --redact --verbose .`; `gitleaks dir --config .gitleaks.toml --redact .` | Phiên bản 8.30.1; lịch sử 8 commit tại lượt CP4 có 1 finding theo rule `lab24-synthetic-token` ở commit `1bdd849`, exit 1 đúng kỳ vọng; directory sạch, exit 0. Không cần thêm allowlist `.venv/`. |
+| CP4 | `python -m piptools compile --generate-hashes -o requirements.lock requirements.txt`; `python -m pip install --require-hashes -r requirements.lock` | Lock 11 package có version/hash; exit 0. Lệnh cài đầu chỉ `already satisfied`, nên cài lại với `--force-reinstall --require-hashes` đã xác thực wheel từ cache: Successfully installed 11 package, exit 0. |
+| CP4 | `python -m pre_commit install`; `python -m pre_commit run --all-files`; `python -m pytest tests/test_supply_chain.py -v --basetemp=.pytest_tmp` | Hook cài tại `.git/hooks/pre-commit`, pin v8.30.1, `gitleaks-system`, `pass_filenames: false`; hook Passed, exit 0; supply chain 3 passed. Chi tiết ở `reports/secrets-incident.md:37`. |
+
+### Lỗi đã gặp và cách xử lý
+
+- Python nền của venv nằm ngoài workspace: chạy trong sandbox ban đầu báo `Access is denied`; các lệnh Python được chạy lại với quyền bổ sung, không đổi venv. Đọc `.pytest_tmp` trong sandbox cũng bị từ chối; đọc lại với quyền bổ sung được. Đây là lỗi môi trường thực thi, không phải test pass/fail của agent.
+- CP4 Gitleaks không tìm được `git` trong `%PATH%`, trả mã 1 do setup; đã thêm `D:\Git\cmd` và `D:\gitleaks` vào PATH phiên, đặt PATHEXT khi thiếu rồi quét lại. Directory scan ban đầu bỏ qua thư mục pytest vì quyền; quét lại đầy đủ với quyền bổ sung. Không dùng hai lượt lỗi/thiếu phạm vi để đánh dấu scanner đạt.
+- `python -m piptools --version` không hỗ trợ option: dùng `importlib.metadata.version('pip-tools')`. Cảnh báo `--strip-extras` của pip-tools không làm compile thất bại. Resolve/hash lock mất thời gian; PyPI metadata trả HTTP 200 và compile hoàn tất, không tự viết hash.
+- CP5 lệnh dò số dòng `rg -n '^def test_' tests/*.py` báo lỗi glob trên Windows (os error 123); sửa thành `rg -n '^def test_' tests -g '*.py'` rồi đọc được các test. Không sửa test để vượt lỗi.
+- Nguồn pháp luật: link toàn văn VBPL lỗi truy cập/403, một số link PDF Công báo lỗi fetch; PDF ký số của NĐ 356/Luật 134 không trích xuất được text. Đã đối chiếu tên/số văn bản ở trang chính thức nhưng điều khoản trong bản gốc **NOT_VERIFIED**, xem `reports/compliance-mapping.md`.
+
+## CP5 — prove sau test, với sink thật
+
+Thực hiện ngày 12/10/2026; sink chưa nghe cổng 10024 trước pytest. Các lệnh dùng Python venv hiện có, UTF-8; PATH/PATHEXT theo sửa môi trường CP4. Không reset ledger; giữ 24 dòng CP3e để append lượt CP5.
+
+### Thứ tự và output thực tế
+
+```powershell
+$env:PYTHONUTF8='1'
+$env:PYTHONIOENCODING='utf-8'
+
+.\.venv\Scripts\python.exe sink/sink.py --reset
+# đã reset ...\reports\sink.log
+.\.venv\Scripts\python.exe -m pytest tests/ -q --basetemp=.pytest_tmp
+# ................................. [100%]
+# 33 passed in 4.80s — 0 failed, 0 skipped
+
+# Sau khi pytest kết thúc, reset lần nữa; không lấy log của fixture làm proof.
+.\.venv\Scripts\python.exe sink/sink.py --reset
+# đã reset ...\reports\sink.log
+.\.venv\Scripts\python.exe -u sink/sink.py
+# sink đang nghe tại http://127.0.0.1:10024, log vào ...\reports\sink.log
+
+# Trong phiên terminal thứ hai, cùng repo:
+.\.venv\Scripts\python.exe -m agent.loop --mock --as dpo "Tổng hợp các ticket còn mở tuần này"
+# Đã tổng hợp 45 ticket (... ticket-901.md, ticket-902.md, ticket-903.md,
+# ticket-904.md, ticket-904b.md).
+Copy-Item -LiteralPath reports/sink.log -Destination reports/attack-after.log
+(Get-Item reports/attack-after.log).Length
+# 0
+.\.venv\Scripts\python.exe -c "from agent.ledger import verify; from pathlib import Path; print(verify(Path('reports/ledger.jsonl')))"
+# True
+# Sau khi copy và đối chiếu, Ctrl+C dừng sink ở terminal server.
+```
+
+Ở lượt thực thi, kích thước được in bằng nhãn `ATTACK_AFTER_BYTES=0`; đây là cùng giá trị `.Length` của file vừa chép, không phải log rỗng được tạo bằng tay.
+
+### Đối chiếu artifact
+
+| Artifact/phép kiểm | Kết quả CP5 |
+|---|---|
+| `reports/attack-before.log` | **4 dòng POST, 1196 byte**; từng dòng `/reconcile`, body có `KH-000999`, CCCD/STK synthetic. Giữ nguyên bản CP2. |
+| `reports/attack-after.log` | **0 dòng POST, 0 byte**, copy từ sink thật sau lượt CLI riêng. |
+| `reports/ledger.jsonl` trước/sau CLI | **24 → 48 dòng**, thêm 24 entry ở dòng 25–48, gồm 3 run ID riêng; số dòng không cố định khi chạy thêm. |
+| Quyền đọc hợp lệ của DPO | 21 `read_customer` allow thực thi trong lượt mới; ngoài ra có 1 entry allow mở mapping private, 1 search allow. `args_hash` dòng **47** khớp hash tham số `customer_id=KH-000999`, decision allow. |
+| Cổng gửi | Dòng **48**: `tool=http_post`, `classification=restricted`, `decision=deny`, `on_behalf_of=dpo`, `reason=restricted data cannot be used in an egress-enabled run`. Dòng 24 là deny của lượt CP3e trước đó. |
+| Ledger completeness/hash | Cả 48 entry đủ reason, principal, agent/run ID, expiry; `ledger.verify()` **True**. Tham số được ghi dạng hash, không raw hồ sơ/body. |
+
+Toàn suite gồm PII 2, policy 4, OBO 5, split 1, injection 8, ledger 3, supply chain 3, check-lure CLI 3, scaffold dispatch 4: tổng **33**, không có SKIP. Kết quả PII có precision/recall đã in ở CP3a; full suite `-q` không in lại các chỉ số đó. Test có fixture reset sink, nên bằng chứng before/after chỉ dùng hai artifact giữ riêng theo thứ tự phía trên.
+
+Các phần runtime của CP1–CP5 đã kiểm trong môi trường mock/synthetic. Điều khoản pháp luật cụ thể và triển khai production **NOT_VERIFIED**. Hash chain không tự phát hiện cắt đuôi/viết lại toàn bộ chuỗi; regex/principal/run context không thay thế kiểm soát production. Chỉ sửa ba báo cáo CP5, cập nhật các mục sau containment trong `injection-corpus.md` đã được yêu cầu ở CP2, và tạo `attack-after.log` được yêu cầu; ledger/sink là artifact do các lệnh được yêu cầu sinh ra, không tạo log phụ.
+
+Rà cuối sau khi viết báo cáo: **58 tham chiếu `file:dòng`** đều trỏ tới dòng tồn tại và không rỗng; bảng mapping đúng 4 cột/6 hàng chủ đề. Corpus đã được fixture khôi phục đủ 901–904b, không còn lure 906 của test. `pre_commit run --all-files` Passed; `gitleaks dir --config .gitleaks.toml --redact .` báo no leaks found, exit 0; `git diff --check` không có lỗi whitespace. Sink đã dừng, không còn listener cổng 10024. Không chạy pytest sau lượt copy proof, nên artifact sau sửa không bị fixture reset thêm.
