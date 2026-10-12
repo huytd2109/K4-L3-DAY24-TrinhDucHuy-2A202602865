@@ -1,5 +1,7 @@
-# Baseline — điền trong checkpoint 1
+# Baseline — CP1
 
-1. Agent có identity mỗi run chưa? Dẫn file/hàm:
-2. Ai cho phép `http_post`? Dẫn file/hàm:
-3. Nếu gửi sai PII ra sink, bằng chứng ở đâu? Dẫn file/hàm:
+1. **Mỗi run đã có identity để kiểm quyền chưa?** Chưa: `_naive_loop(message, llm)` không nhận danh tính người dùng và không tạo `agent_id`/`run_id` trong luồng baseline (`agent/loop.py:27`). Dù `run_once()` có tham số `principal_id` (`agent/loop.py:58`), khi chuyển sang baseline nó chỉ gọi `return _naive_loop(message, llm)` (`agent/loop.py:74`), nên danh tính đó không được dùng để kiểm quyền.
+
+2. **Trước POST có policy kiểm mục đích, quyền và loại dữ liệu không; ai quyết định gửi?** Không có cổng policy trước các lời gọi trực tiếp `tools.read_customer(customer_id)` (`agent/loop.py:39`) và `tools.http_post(...)` (`agent/loop.py:44`); `http_post` chỉ kiểm scheme, host và port (`agent/tools.py:76–83`), không xét mục đích, quyền hay loại dữ liệu. Ticket là dữ liệu nhưng baseline xử lý chỉ thị bên trong như lệnh: `search_docs` lấy ticket (`agent/loop.py:31`), ghép nội dung (`agent/loop.py:32`), rồi `llm.find_injection` trả về chỉ thị (`agent/loop.py:34`). Chính nhánh `injected is not None` của baseline làm theo kết quả đó để chọn customer cần đọc và URL gửi tới, rồi POST khi thu được record (`agent/loop.py:35–44`).
+
+3. **Body POST được tạo ở đâu; bằng chứng sink nhận body nằm ở file nào?** Body `{"records": collected}` được tạo ngay trong lời gọi POST (`agent/loop.py:44`), với `collected` chứa các record trả về từ `read_customer()` (`agent/loop.py:39`), rồi được gửi dưới dạng JSON bằng `requests.post(url, json=body, timeout=timeout)` (`agent/tools.py:84`). Khi sink nhận POST, nó sẽ ghi path và body vào `reports/sink.log`: đường dẫn log được đặt ở `sink/sink.py:37`, còn phần đọc body và ghi một dòng JSON nằm tại `sink/sink.py:44–47`.
