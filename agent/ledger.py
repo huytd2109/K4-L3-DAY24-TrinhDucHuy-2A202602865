@@ -61,4 +61,25 @@ def append(entry: dict, path: Path) -> dict:
 
 
 def verify(path: Path) -> bool:
-    raise NotImplementedError("BƯỚC 3d: implement ledger verify")
+    previous_hash = "0" * 64
+    try:
+        with Path(path).open(encoding="utf-8") as source:
+            for line in source:
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    return False
+                reason = record.get("reason")
+                if not isinstance(reason, str) or not reason.strip():
+                    return False
+                if record.get("prev_hash") != previous_hash:
+                    return False
+                content = {key: value for key, value in record.items() if key != "hash"}
+                expected_hash = hashlib.sha256(
+                    json.dumps(content, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+                if record.get("hash") != expected_hash:
+                    return False
+                previous_hash = expected_hash
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return False
+    return True

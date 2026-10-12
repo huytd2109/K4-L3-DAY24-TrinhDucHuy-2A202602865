@@ -3,7 +3,7 @@
 - OS / Python / Gitleaks version:
 - `python -m pytest tests/ -q`:
 - `pre-commit run --all-files`:
-- Ledger verify:
+- Ledger verify: `True` trên `reports/ledger.jsonl` sau lượt CLI `dpo` ở CP3e; thử sửa một ký tự ở dòng giữa trả `False`, khôi phục nguyên file trả `True`.
 - Các lỗi còn lại:
 
 ## CP3a–CP3c — 12/10/2026
@@ -44,3 +44,43 @@ Môi trường: Windows/PowerShell, Python 3.13.15, pytest 9.1.1, dùng `.venv\S
 - Chỉ sửa các file có sẵn `agent/pii.py`, `agent/policy.py`, `agent/runner.py`, `agent/ledger.py` và báo cáo này. `ledger.append()` được triển khai vì runner cần ghi allow/deny; `ledger.verify()` vẫn là scaffold cho checkpoint ledger tiếp theo. Không sửa test, corpus, tool hay allowlist.
 - Chưa chạy test split, injection, ledger hoặc toàn suite ở bước này; chưa tạo `attack-after.log`, chưa kết luận CP5 hoàn tất. `reports/attack-before.log` vẫn giữ đủ 4 dòng bằng chứng CP2.
 - Các test dùng thư mục tạm `.pytest_tmp` và sink fixture của repo. Lần đọc ledger tạm sau test bằng PowerShell trong sandbox báo `Access to the path ...\.pytest_tmp is denied`; đọc lại với quyền bổ sung thành công. Ba lệnh pytest chạy với quyền bổ sung do Python nền của venv nằm ngoài workspace; không có test thất bại cần sửa.
+
+## CP3d–CP3e — 12/10/2026
+
+Kết quả dưới đây cập nhật trạng thái sau CP3a–CP3c: `ledger.verify()` đã được triển khai, runner đã có lượt kiểm egress riêng. Chỉ sửa `agent/runner.py`, `agent/ledger.py` và báo cáo này; file mới `reports/ledger.jsonl` là artifact được yêu cầu. Không tạo log phụ hoặc sửa test/corpus.
+
+### Lệnh và kết quả thực tế
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_split.py -v --basetemp=.pytest_tmp
+# 1 passed
+
+.\.venv\Scripts\python.exe -m pytest tests/test_injection.py -v --basetemp=.pytest_tmp
+# 8 passed, 0 skipped (4 lure x 2 principal)
+
+.\.venv\Scripts\python.exe -m pytest tests/test_ledger.py -v --basetemp=.pytest_tmp
+# 3 passed
+
+.\.venv\Scripts\python.exe -m agent.loop --mock --as dpo "Tổng hợp các ticket còn mở tuần này"
+# Đã tổng hợp 45 ticket, gồm 901, 902, 903, 904 và 904b.
+
+.\.venv\Scripts\python.exe -c "from agent.ledger import verify; from pathlib import Path; print(verify(Path('reports/ledger.jsonl')))"
+# True
+```
+
+Các lệnh dùng cùng venv và biến môi trường UTF-8 như CP3a–CP3c, với quyền bổ sung để truy cập Python nền. Không có test thất bại hoặc SKIP trong lượt kiểm này.
+
+### Split và cổng gửi
+
+- Test split dùng lure nhắc `KH-000777` trong text: spy xác nhận khách này chưa từng được gọi qua `read_customer`, đồng thời vẫn có khách liên quan được đọc. Run B chỉ nhận số ticket từ tên file và suy customer qua `related_tickets`; không nhận customer ID hay text tự do từ kết quả `find_injection`.
+- Run A redact nội dung trước tóm tắt; run private kiểm policy và ghi ledger trước mở mapping và trước từng `read_customer`. Đây là các ngữ cảnh quyền/run ID riêng trong cùng process Python của lab, không phải sandbox ở cấp hệ điều hành.
+- Khi mock nhận diện chỉ thị, runner chỉ giữ URL cho lượt kiểm gửi riêng với `restricted`, `egress_enabled=True` và scope `http_post`. Lượt này không mang record khách; policy deny được ghi ledger trước khi kết thúc, không gọi `tools.http_post`.
+- Test injection chạy đủ 901, 902, 903, cặp 904/904b dưới cả `support_l1` và `dpo`. DPO vẫn được đọc khách gắn với ticket hợp lệ; nội dung PII không tới sink. Sau các test và lượt CLI, `reports/sink.log` có 0 byte. Chưa tạo `attack-after.log` của CP5.
+
+### Ledger thật và kiểm sửa đổi
+
+- Lượt CLI đầu ở bước này tạo **24 entry**, có **3 run ID riêng**, mọi entry đủ `on_behalf_of`, `agent_id`, `run_id`, `expires_at`, `reason`. Đây là số quan sát ở lượt kiểm, không phải số dòng cố định; chạy CLI thêm sẽ append.
+- `reports/ledger.jsonl:24`: `tool=http_post`, `decision=deny`, `classification=restricted`, `on_behalf_of=dpo`, `reason=restricted data cannot be used in an egress-enabled run`. Đã tính lại `args_hash` từ riêng `{"url": "http://127.0.0.1:10024/reconcile"}` và đối chiếu khớp. Không ghi body hoặc hồ sơ khách vào ledger.
+- `append()` đặt `prev_hash` đầu tiên bằng 64 số `0`, nối hash dòng trước, tính SHA-256 từ JSON `sort_keys=True` chưa chứa `hash`. `verify()` kiểm reason là chuỗi không trắng, liên kết `prev_hash`, hash từng dòng; JSON hỏng/file không đọc được trả `False`.
+- Đã tự kiểm trên ledger thật: lưu bytes gốc trong bộ nhớ, đổi đúng một ký tự ở **dòng 13** từ `"decision": "allow"` thành `"decision": "Allow"`; `verify()` trả **False**. Khôi phục nguyên bytes trong `finally`, đối chiếu file khớp bản gốc và `verify()` trả **True**. Không tạo file tamper hoặc backup phụ; ledger cuối còn nguyên bằng chứng hợp lệ.
+- Hash chain không tự phát hiện xoá dòng cuối hay viết lại cả chuỗi kèm tính lại hash nếu thiếu mốc tin cậy bên ngoài. Chưa chạy toàn suite hoặc checkpoint supply chain/CP5 ở lượt này. `reports/attack-before.log` vẫn giữ đủ 4 dòng CP2.

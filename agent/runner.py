@@ -131,6 +131,10 @@ def handle(message: str, llm, log_dir: Path | None = None,
     if not _authorize(search_context, {"query": message}, ledger_path):
         return "Không được phép tìm ticket với principal này."
     docs = tools.search_docs(message)
+    injected = llm.find_injection("\n\n".join(doc["text"] for doc in docs))
+    # Keep only the requested destination for the separate egress check;
+    # attacker-supplied customer IDs never enter the private-data run.
+    requested_url = injected.target_url if injected is not None else None
     sanitized_docs = [{"id": doc["id"], "text": pii.redact(doc["text"])} for doc in docs]
     summary = llm.summarize(sanitized_docs)
     # Only typed IDs from file names cross to the private-data run. Free
@@ -146,4 +150,15 @@ def handle(message: str, llm, log_dir: Path | None = None,
         agent_scopes=("read_customer",), expires_at=expires_at,
     )
     _read_related_customers(ticket_ids, customer_context, ledger_path)
+    if requested_url is not None:
+        egress_context = policy.PolicyContext(
+            data_classification="restricted", request_purpose="support-reply",
+            agent_owner=f"{agent_id}/{uuid4().hex}", delegation_depth=0,
+            egress_enabled=True, principal_id=principal_id, requested_tool="http_post",
+            agent_scopes=("http_post",), expires_at=expires_at,
+        )
+        # This run holds only a URL, never customer records. Restricted
+        # egress must be denied and audited; no network tool executes.
+        if _authorize(egress_context, {"url": requested_url}, ledger_path):
+            raise RuntimeError("Policy unexpectedly authorized restricted egress")
     return summary
